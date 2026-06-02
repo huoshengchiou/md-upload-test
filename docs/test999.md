@@ -1,6 +1,6 @@
 # Code Review 報告（Staged）
 
-> **時間**：2026/6/2 下午3:48:36
+> **時間**：2026/6/2 下午4:30:46
 > **工具**：Claude Agent SDK
 
 ## 變更統計
@@ -12,181 +12,185 @@ mock-src/sample-code-a.ts | 9 +++++++++
 
 ---
 
-# Code Review 報告
+# Code Review：`mock-src/sample-code-a.ts`
+
+---
 
 ## 1. 變更摘要
 
-本次新增一個 `numberToAccountingstring` 函式，位於 `mock-src/sample-code-a.ts`。  
-功能意圖為將數字轉換為**會計格式字串**（accounting format），即負數以括號表示，例如 `-100` → `(100)`。  
-變更範圍小（9 行），但存在一個**嚴重邏輯錯誤**及多項型別與品質問題。
+本次新增一個獨立的 TypeScript 工具函式 `numberToAccountingstring`，其目的是將數字轉換為會計格式字串——負數（或特定條件下的數字）以括號包裹表示，正數則直接轉為字串。
 
 ---
 
-## 2. 潛在問題
+## 2. 潛在問題 🐛
 
-### 🔴 嚴重 Bug：閾值條件錯誤
+### 🔴 嚴重 Bug：判斷條件邏輯錯誤
 
 ```typescript
-// 現有程式碼（第 3 行）
+// 原始碼（第 3 行）
 if (number < 9) {
 ```
 
-這裡的 `9` 應為 `0`。**會計格式的規則是：負數才需要加括號**，而非「小於 9 的數」。
+**會計格式**的核心語意是：**負數**才用括號表示（如 `-100` → `(100)`）。條件應為 `number < 0`，而非 `number < 9`。
 
-| 輸入 | 現有行為 | 預期行為 |
-|------|----------|----------|
-| `5`  | `"(5)"` ❌ | `"5"` |
-| `8`  | `"(8)"` ❌ | `"8"` |
-| `-5` | `"(5)"` ✅ | `"(5)"` |
-| `10` | `"10"` ✅ | `"10"` |
+目前的邏輯導致：
+| 輸入值 | 當前輸出 | 預期輸出 |
+|--------|----------|----------|
+| `-50` | `(50)` ✅ | `(50)` |
+| `0` | `(0)` ❌ | `0` |
+| `5` | `(5)` ❌ | `5` |
+| `9` | `9` ✅ | `9` |
+| `100` | `100` ✅ | `100` |
 
----
+### 🔴 未處理的隱式 `undefined` 回傳
+
+```typescript
+// 第 1–8 行
+function numberToAccountingstring(number: any) {
+  if (number != null) {  // 若 number 為 null/undefined，函式隱式回傳 undefined
+    ...
+  }
+  // 這裡沒有 return，呼叫端拿到 undefined 可能引發後續錯誤
+}
+```
+
+呼叫端若直接使用回傳值（如拼接字串），將得到 `"undefined"` 的意外結果。
 
 ### 🟡 邊界案例未處理
 
-| 輸入 | 現有行為 | 風險 |
-|------|----------|------|
-| `NaN` | `"NaN"` | 可能造成顯示異常 |
-| `Infinity` / `-Infinity` | `"(Infinity)"` / `"Infinity"` | 不合理的輸出 |
-| `0` | `"(0)"` ❌ | 0 不應加括號 |
-| `null` / `undefined` | `undefined`（無回傳值） | 呼叫端若未處理會有 runtime 錯誤 |
+| 輸入 | 行為 | 問題 |
+|------|------|------|
+| `NaN` | `NaN != null` 為 `true`，`NaN < 9` 為 `false`，回傳 `"NaN"` | 語意不明確 |
+| `Infinity` | `-Infinity < 9` 為 `true`，回傳 `(Infinity)` | 會計格式不應出現無限大 |
+| `"5"` (字串) | `"5" < 9` 為 `true`，`Math.abs("5" as any)` 為 `5` | 型別為 `any` 造成靜默錯誤 |
 
 ---
 
-### 🟡 函式可能回傳 `undefined`
+## 3. 程式碼品質 📐
 
-當傳入 `null` 時，函式沒有任何 `return`，隱式回傳 `undefined`，但型別宣告上完全看不出這一點，容易誤用。
-
----
-
-## 3. 程式碼品質
-
-### 🔴 命名問題：違反 camelCase 規範
+### 🟡 函式命名不符合慣例
 
 ```typescript
-// ❌ 現有
+// ❌ 原始：末尾 "string" 的 's' 未大寫
 function numberToAccountingstring(...)
 
-// ✅ 應為
+// ✅ 建議：完整 camelCase
 function numberToAccountingString(...)
 ```
 
-TypeScript / JavaScript 命名慣例中，複合詞每個單字首字母均應大寫（`String` 而非 `string`）。
-
----
-
-### 🔴 參數型別使用 `any`
+### 🟡 使用 `any` 型別，喪失 TypeScript 型別保護
 
 ```typescript
-// ❌ 現有
+// ❌ 原始
 function numberToAccountingstring(number: any)
 
-// ✅ 應為
+// ✅ 建議：明確宣告參數型別與回傳型別
 function numberToAccountingString(value: number): string
 ```
 
-使用 `any` 完全失去 TypeScript 靜態型別的優勢：
-- 無法在編譯期攔截錯誤（例如傳入字串 `"abc"`）
-- IDE 無法提供準確的自動補全與型別推斷
+### 🟡 缺少函式說明文件（JSDoc）
+
+公開工具函式應附上用途說明、參數說明與回傳值說明，方便 IDE 提示與團隊維護。
+
+### 🟡 函式未 `export`
+
+若為工具函式，應明確匯出；若為模組私用，應加上註解說明意圖。
 
 ---
 
-### 🟡 參數命名遮蔽全域 `number` 型別
+## 4. 效能考量 ⚡
+
+本函式邏輯簡單，不存在效能瓶頸，但有一點可微調：
 
 ```typescript
-function numberToAccountingstring(number: any) { ... }
-//                                 ^^^^^^ 這會遮蔽內建型別 `number`
-```
+// 原始（第 7 行）
+return number.toString();
 
-建議改用 `value` 或 `amount` 作為參數名稱，避免語意混淆。
+// 建議：與第一個 return 風格一致，使用模板字串
+return `${number}`;
+// 或保留 toString() 亦可，但整體風格應統一
+```
 
 ---
 
-### 🟡 缺少回傳型別宣告與 JSDoc
+## 5. 最佳實踐 ✅
 
-明確宣告回傳型別可提升可讀性與型別安全：
+### 缺少明確回傳型別標註
+
+TypeScript 強型別的最大優勢在於回傳型別的明確性。現行寫法中，TypeScript 會推斷回傳型別為 `string | undefined`，但這個 `undefined` 是無意為之的邊界缺陷，並非設計。
+
+### 使用 `!= null` 而非嚴格比較
 
 ```typescript
-function numberToAccountingString(value: number): string { ... }
+// 原始（寬鬆比較，同時排除 null 與 undefined）
+if (number != null)
+
+// ✅ TypeScript 中建議改為明確的型別守衛
+// 配合型別宣告為 number，可直接移除此防呆，或改寫為：
+if (typeof value !== 'number' || !isFinite(value)) {
+  throw new TypeError(`Expected a finite number, got: ${value}`);
+}
 ```
 
 ---
 
-## 4. 效能考量
+## 6. 改善建議 🔧
 
-本函式邏輯簡單，**無明顯效能問題**。  
-唯一需注意的是 `Math.abs()` 在傳入非數字時（因使用 `any`）行為不確定，但在正確型別限制下不是問題。
-
----
-
-## 5. 最佳實踐
-
-### 應符合的 TypeScript 慣例
-
-- ✅ 明確宣告參數與回傳型別（避免 `any`）
-- ✅ 使用 `=== null` 或 TypeScript optional 機制取代 `!= null`（雖然此處 `!= null` 同時攔截 `undefined`，是合法慣用法，但加上型別限制後此判斷可完全移除）
-- ✅ 函式名稱遵循 camelCase
-
----
-
-## 6. 改善建議
-
-### 完整重構範例
+以下為完整重構範例：
 
 ```typescript
 /**
  * 將數字轉換為會計格式字串。
- * - 負數以括號表示，例如：-100 → "(100)"
- * - 零與正數直接轉為字串，例如：100 → "100"
+ * - 負數以括號表示，例如 -100 → "(100)"
+ * - 零與正數直接轉為字串，例如 0 → "0"、100 → "100"
  *
- * @param value - 要格式化的數字
+ * @param value - 要轉換的有限數字
  * @returns 會計格式字串
+ * @throws {TypeError} 若輸入值不是有限數字
+ *
+ * @example
+ * numberToAccountingString(-50)  // "(50)"
+ * numberToAccountingString(0)    // "0"
+ * numberToAccountingString(100)  // "100"
  */
-function numberToAccountingString(value: number): string {
-  if (!isFinite(value) || isNaN(value)) {
-    throw new RangeError(`無效的數字: ${value}`);
+export function numberToAccountingString(value: number): string {
+  if (typeof value !== 'number' || !isFinite(value)) {
+    throw new TypeError(`Expected a finite number, got: ${value}`);
   }
 
   if (value < 0) {
     return `(${Math.abs(value)})`;
   }
 
-  return value.toString();
+  return `${value}`;
 }
 ```
 
-### 若需支援 `null` / `undefined` 的可選版本
-
-```typescript
-function numberToAccountingString(value: number | null | undefined): string | null {
-  if (value == null) return null;
-
-  if (!isFinite(value) || isNaN(value)) {
-    throw new RangeError(`無效的數字: ${value}`);
-  }
-
-  return value < 0 ? `(${Math.abs(value)})` : value.toString();
-}
-```
+**重構重點說明：**
+1. ✅ 修正條件 `< 9` → `< 0`（核心 Bug 修正）
+2. ✅ 明確型別：`number` 取代 `any`，加上回傳型別 `: string`
+3. ✅ 防禦性型別守衛：拒絕 `NaN`、`Infinity` 等非法輸入並拋出明確錯誤
+4. ✅ 加上 `export` 與 JSDoc 文件
+5. ✅ 修正函式名稱 `numberToAccountingString`
+6. ✅ 統一使用模板字串風格
 
 ---
 
 ## 綜合評分
 
-> **評分：2 / 10**
+> **3 / 10**
 
 ### 給分依據
 
-| 面向 | 狀態 |
+| 面向 | 狀況 |
 |------|------|
-| 函式結構清晰，可讀性尚可 | ✅ |
-| 存在嚴重邏輯錯誤（`< 9` 應為 `< 0`） | ❌ |
-| 使用 `any` 型別 | ❌ |
-| 命名不符慣例 | ❌ |
-| 邊界案例未處理（`NaN`、`Infinity`、`0`） | ❌ |
-| 無回傳型別宣告 | ❌ |
+| 邏輯正確性 | ❌ 核心條件 `< 9` 是錯誤的，會計格式應為 `< 0` |
+| 型別安全 | ❌ 使用 `any`，放棄 TypeScript 最大優勢 |
+| 邊界處理 | ❌ `null`/`undefined` 時隱式回傳 `undefined`，NaN/Infinity 未處理 |
+| 命名規範 | ⚠️ `numberToAccountingstring` 命名有誤 |
+| 可維護性 | ⚠️ 無文件、無匯出 |
+| 結構簡潔 | ✅ 函式本體短小，意圖基本清楚 |
 
 ### 最值得改進的一點
 
-**立即修正第 3 行的閾值**：將 `number < 9` 改為 `number < 0`。  
-這是一個會導致**所有正數 0–8 被錯誤格式化**的功能性 Bug，在上線前必須修復，其餘品質問題可於後續重構中逐步改善。
+**立即修正第 3 行的邏輯錯誤** `number < 9` → `number < 0`。這是影響所有呼叫端正確性的核心 Bug，其餘改善屬於品質提升，但此項是功能正確性的根本問題。
